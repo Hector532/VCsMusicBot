@@ -1,408 +1,378 @@
-from __future__ import unicode_literals
+# Copyright (C) 2021 By Amort Music-Project
+# Commit Start Date 20/10/2021
+# Finished On 28/10/2021
 
+import re
 import asyncio
-import math
-import os
-import time
-from random import randint
-from urllib.parse import urlparse
 
-import aiofiles
-import aiohttp
-import requests
-import wget
-import youtube_dl
-from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, MessageNotModified
-from pyrogram.types import Message
-from youtube_search import YoutubeSearch
-from youtubesearchpython import SearchVideos
-
-from VCsMusicBot.config import DURATION_LIMIT
-from VCsMusicBot.modules.play import arq
+from config import ASSISTANT_NAME, BOT_USERNAME, IMG_1, IMG_2
+from driver.filters import command, other_filters
+from driver.queues import QUEUE, add_to_queue
+from driver.amort import call_py, user
+from pyrogram import Client
+from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from pytgcalls import StreamType
+from pytgcalls.types.input_stream import AudioPiped
+from youtubesearchpython import VideosSearch
 
 
-@Client.on_message(filters.command("song") & ~filters.channel)
-def song(client, message):
-
-    user_id = message.from_user.id
-    user_name = message.from_user.first_name
-    rpk = "[" + user_name + "](tg://user?id=" + str(user_id) + ")"
-
-    query = ""
-    for i in message.command[1:]:
-        query += " " + str(i)
-    print(query)
-    m = message.reply("🔎 Finding the song...")
-    ydl_opts = {"format": "bestaudio[ext=m4a]"}
+def ytsearch(query):
     try:
-        results = YoutubeSearch(query, max_results=1).to_dict()
-        link = f"https://youtube.com{results[0]['url_suffix']}"
-        # print(results)
-        title = results[0]["title"][:40]
-        thumbnail = results[0]["thumbnails"][0]
-        thumb_name = f"thumb{title}.jpg"
-        thumb = requests.get(thumbnail, allow_redirects=True)
-        open(thumb_name, "wb").write(thumb.content)
-
-        duration = results[0]["duration"]
-        results[0]["url_suffix"]
-        results[0]["views"]
-
-    except Exception as e:
-        m.edit("❌ Found Nothing.\n\nTry another keywork or maybe spell it properly.")
-        print(str(e))
-        return
-    m.edit("Downloading the song ")
-    try:
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(link, download=False)
-            audio_file = ydl.prepare_filename(info_dict)
-            ydl.process_info(info_dict)
-        rep = "**🎵 Uploaded by @VCsMusicBot**"
-        secmul, dur, dur_arr = 1, 0, duration.split(":")
-        for i in range(len(dur_arr) - 1, -1, -1):
-            dur += int(dur_arr[i]) * secmul
-            secmul *= 60
-        message.reply_audio(
-            audio_file,
-            caption=rep,
-            thumb=thumb_name,
-            parse_mode="md",
-            title=title,
-            duration=dur,
-        )
-        m.delete()
-    except Exception as e:
-        m.edit("❌ Error")
-        print(e)
-
-    try:
-        os.remove(audio_file)
-        os.remove(thumb_name)
+        search = VideosSearch(query, limit=1)
+        for r in search.result()["result"]:
+            ytid = r["id"]
+            if len(r["title"]) > 34:
+                songname = r["title"][:70]
+            else:
+                songname = r["title"]
+            url = f"https://www.youtube.com/watch?v={ytid}"
+        return [songname, url]
     except Exception as e:
         print(e)
+        return 0
 
 
-def get_text(message: Message) -> [None, str]:
-    text_to_return = message.text
-    if message.text is None:
-        return None
-    if " " in text_to_return:
-        try:
-            return message.text.split(None, 1)[1]
-        except IndexError:
-            return None
-    else:
-        return None
-
-
-def humanbytes(size):
-    if not size:
-        return ""
-    power = 2 ** 10
-    raised_to_pow = 0
-    dict_power_n = {0: "", 1: "Ki", 2: "Mi", 3: "Gi", 4: "Ti"}
-    while size > power:
-        size /= power
-        raised_to_pow += 1
-    return str(round(size, 2)) + " " + dict_power_n[raised_to_pow] + "B"
-
-
-async def progress(current, total, message, start, type_of_ps, file_name=None):
-    now = time.time()
-    diff = now - start
-    if round(diff % 10.00) == 0 or current == total:
-        percentage = current * 100 / total
-        speed = current / diff
-        elapsed_time = round(diff) * 1000
-        if elapsed_time == 0:
-            return
-        time_to_completion = round((total - current) / speed) * 1000
-        estimated_total_time = elapsed_time + time_to_completion
-        progress_str = "{0}{1} {2}%\n".format(
-            "".join(["🔴" for i in range(math.floor(percentage / 10))]),
-            "".join(["🔘" for i in range(10 - math.floor(percentage / 10))]),
-            round(percentage, 2),
-        )
-        tmp = progress_str + "{0} of {1}\nETA: {2}".format(
-            humanbytes(current), humanbytes(total), time_formatter(estimated_total_time)
-        )
-        if file_name:
-            try:
-                await message.edit(
-                    "{}\n**File Name:** `{}`\n{}".format(type_of_ps, file_name, tmp)
-                )
-            except FloodWait as e:
-                await asyncio.sleep(e.x)
-            except MessageNotModified:
-                pass
-        else:
-            try:
-                await message.edit("{}\n{}".format(type_of_ps, tmp))
-            except FloodWait as e:
-                await asyncio.sleep(e.x)
-            except MessageNotModified:
-                pass
-
-
-def get_user(message: Message, text: str) -> [int, str, None]:
-    if text is None:
-        asplit = None
-    else:
-        asplit = text.split(" ", 1)
-    user_s = None
-    reason_ = None
-    if message.reply_to_message:
-        user_s = message.reply_to_message.from_user.id
-        reason_ = text if text else None
-    elif asplit is None:
-        return None, None
-    elif len(asplit[0]) > 0:
-        user_s = int(asplit[0]) if asplit[0].isdigit() else asplit[0]
-        if len(asplit) == 2:
-            reason_ = asplit[1]
-    return user_s, reason_
-
-
-def get_readable_time(seconds: int) -> int:
-    count = 0
-    ping_time = ""
-    time_list = []
-    time_suffix_list = ["s", "m", "h", "days"]
-
-    while count < 4:
-        count += 1
-        if count < 3:
-            remainder, result = divmod(seconds, 60)
-        else:
-            remainder, result = divmod(seconds, 24)
-        if seconds == 0 and remainder == 0:
-            break
-        time_list.append(int(result))
-        seconds = int(remainder)
-
-    for x in range(len(time_list)):
-        time_list[x] = str(time_list[x]) + time_suffix_list[x]
-    if len(time_list) == 4:
-        ping_time += time_list.pop() + ", "
-
-    time_list.reverse()
-    ping_time += ":".join(time_list)
-
-    return ping_time
-
-
-def time_formatter(milliseconds: int) -> str:
-    seconds, milliseconds = divmod(int(milliseconds), 1000)
-    minutes, seconds = divmod(seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    days, hours = divmod(hours, 24)
-    tmp = (
-        ((str(days) + " day(s), ") if days else "")
-        + ((str(hours) + " hour(s), ") if hours else "")
-        + ((str(minutes) + " minute(s), ") if minutes else "")
-        + ((str(seconds) + " second(s), ") if seconds else "")
-        + ((str(milliseconds) + " millisecond(s), ") if milliseconds else "")
+async def ytdl(link):
+    proc = await asyncio.create_subprocess_exec(
+        "yt-dlp",
+        "-g",
+        "-f",
+        "bestaudio",
+        f"{link}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    return tmp[:-2]
+    stdout, stderr = await proc.communicate()
+    if stdout:
+        return 1, stdout.decode().split("\n")[0]
+    else:
+        return 0, stderr.decode()
 
 
-ydl_opts = {
-    "format": "bestaudio/best",
-    "writethumbnail": True,
-    "postprocessors": [
-        {
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }
-    ],
-}
-
-
-def get_file_extension_from_url(url):
-    url_path = urlparse(url).path
-    basename = os.path.basename(url_path)
-    return basename.split(".")[-1]
-
-
-# Funtion To Download Song
-async def download_song(url):
-    song_name = f"{randint(6969, 6999)}.mp3"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                f = await aiofiles.open(song_name, mode="wb")
-                await f.write(await resp.read())
-                await f.close()
-    return song_name
-
-
-is_downloading = False
-
-
-def time_to_seconds(time):
-    stringt = str(time)
-    return sum(int(x) * 60 ** i for i, x in enumerate(reversed(stringt.split(":"))))
-
-
-@Client.on_message(filters.command("saavn") & ~filters.edited)
-async def jssong(_, message):
-    global is_downloading
-    if len(message.command) < 2:
-        await message.reply_text("/saavn requires an argument.")
-        return
-    if is_downloading:
-        await message.reply_text(
-            "Another download is in progress, try again after sometime."
-        )
-        return
-    is_downloading = True
-    text = message.text.split(None, 1)[1]
-    query = text.replace(" ", "%20")
-    m = await message.reply_text("Searching...")
-    try:
-        songs = await arq.saavn(query)
-        if not songs.ok:
-            await message.reply_text(songs.result)
-            return
-        sname = songs.result[0].song
-        slink = songs.result[0].media_url
-        ssingers = songs.result[0].singers
-        await m.edit("Downloading")
-        song = await download_song(slink)
-        await m.edit("Uploading")
-        await message.reply_audio(audio=song, title=sname, performer=ssingers)
-        os.remove(song)
-        await m.delete()
-    except Exception as e:
-        is_downloading = False
-        await m.edit(str(e))
-        return
-    is_downloading = False
-
-
-# Deezer Music
-
-
-@Client.on_message(filters.command("deezer") & ~filters.edited)
-async def deezsong(_, message):
-    global is_downloading
-    if len(message.command) < 2:
-        await message.reply_text("/deezer requires an argument.")
-        return
-    if is_downloading:
-        await message.reply_text(
-            "Another download is in progress, try again after sometime."
-        )
-        return
-    is_downloading = True
-    text = message.text.split(None, 1)[1]
-    query = text.replace(" ", "%20")
-    m = await message.reply_text("Searching...")
-    try:
-        songs = await arq.deezer(query, 1)
-        if not songs.ok:
-            await message.reply_text(songs.result)
-            return
-        title = songs.result[0].title
-        url = songs.result[0].url
-        artist = songs.result[0].artist
-        await m.edit("Downloading")
-        song = await download_song(url)
-        await m.edit("Uploading")
-        await message.reply_audio(audio=song, title=title, performer=artist)
-        os.remove(song)
-        await m.delete()
-    except Exception as e:
-        is_downloading = False
-        await m.edit(str(e))
-        return
-    is_downloading = False
-
-
-@Client.on_message(filters.command(["vsong", "video"]))
-async def ytmusic(client, message: Message):
-    global is_downloading
-    if is_downloading:
-        await message.reply_text(
-            "Another download is in progress, try again after sometime."
-        )
-        return
-
-    urlissed = get_text(message)
-
-    pablo = await client.send_message(
-        message.chat.id, f"`Getting {urlissed} From Youtube Servers. Please Wait.`"
+@Client.on_message(command(["mplay", f"mplay@{BOT_USERNAME}"]) & other_filters)
+async def play(c: Client, m: Message):
+    replied = m.reply_to_message
+    chat_id = m.chat.id
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(text="• القائمة", callback_data="cbmenu"),
+                InlineKeyboardButton(text="• إغلاق", callback_data="cls"),
+            ]
+        ]
     )
-    if not urlissed:
-        await pablo.edit("Invalid Command Syntax, Please Check Help Menu To Know More!")
-        return
-
-    search = SearchVideos(f"{urlissed}", offset=1, mode="dict", max_results=1)
-    mi = search.result()
-    mio = mi["search_result"]
-    mo = mio[0]["link"]
-    thum = mio[0]["title"]
-    fridayz = mio[0]["id"]
-    thums = mio[0]["channel"]
-    kekme = f"https://img.youtube.com/vi/{fridayz}/hqdefault.jpg"
-    await asyncio.sleep(0.6)
-    url = mo
-    sedlyf = wget.download(kekme)
-    opts = {
-        "format": "best",
-        "addmetadata": True,
-        "key": "FFmpegMetadata",
-        "prefer_ffmpeg": True,
-        "geo_bypass": True,
-        "nocheckcertificate": True,
-        "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
-        "outtmpl": "%(id)s.mp4",
-        "logtostderr": False,
-        "quiet": True,
-    }
+    if m.sender_chat:
+        return await m.reply_text("you're an __Anonymous Admin__ !\n\n» revert back to user account from admin rights.")
     try:
-        is_downloading = True
-        with youtube_dl.YoutubeDL(opts) as ytdl:
-            infoo = ytdl.extract_info(url, False)
-            duration = round(infoo["duration"] / 60)
-
-            if duration > DURATION_LIMIT:
-                await pablo.edit(
-                    f"❌ Videos longer than {DURATION_LIMIT} minute(s) aren't allowed, the provided video is {duration} minute(s)"
-                )
-                is_downloading = False
+        aing = await c.get_me()
+    except Exception as e:
+        return await m.reply_text(f"خطاء:\n\n{e}")
+    a = await c.get_chat_member(chat_id, aing.id)
+    if a.status != "administrator":
+        await m.reply_text(
+            f"💡 لاستخدامي ، يجب أن أكون ** مشرف ** مع ** الصلاحيات التالية **:\n\n» ❌ __حذف الرسائل__\n» ❌ __دعوة المستخدمين__\n» ❌ __ادارة المكالمات المرئية__\n\n** يتم تحديث البيانات ** تلقائيًا بعد أن تقوم بترقيتي **"
+        )
+        return
+    if not a.can_manage_voice_chats:
+        await m.reply_text(
+            "ليس لدي صلاحية:" + "\n\n» ❌ __ادارة المكالمات المرئية__"
+        )
+        return
+    if not a.can_delete_messages:
+        await m.reply_text(
+            "ليس لدي صلاحية:" + "\n\n» ❌ __حذف الرسائل__"
+        )
+        return
+    if not a.can_invite_users:
+        await m.reply_text("ليس لدي صلاحية:" + "\n\n» ❌ __اضافة المستخدمين__")
+        return
+    try:
+        ubot = await user.get_me()
+        b = await c.get_chat_member(chat_id, ubot.id)
+        if b.status == "kicked":
+            await m.reply_text(
+                f"@{ASSISTANT_NAME} **محظور في المجموعة** {m.chat.title}\n\n» **قم بإلغاء حظر المستخدم حساب المساعد أولاً إذا كنت تريد استخدام هذا البوت**"
+            )
+            return
+    except UserNotParticipant:
+        if m.chat.username:
+            try:
+                await user.join_chat(m.chat.username)
+            except Exception as e:
+                await m.reply_text(f"❌ **فشل userbot في الانضمام**\n\n**السبب**: `{e}`")
                 return
-            ytdl_data = ytdl.extract_info(url, download=True)
+        else:
+            try:
+                pope = await c.export_chat_invite_link(chat_id)
+                pepo = await c.revoke_chat_invite_link(chat_id, pope)
+                await user.join_chat(pepo.invite_link)
+            except UserAlreadyParticipant:
+                pass
+            except Exception as e:
+                return await m.reply_text(
+                    f"❌ **فشل userbot في الانضمام**\n\n**السبب**: `{e}`"
+                )
 
-    except Exception:
-        # await pablo.edit(event, f"**Failed To Download** \n**Error :** `{str(e)}`")
-        is_downloading = False
-        return
+    if replied:
+        if replied.audio or replied.voice:
+            suhu = await replied.reply("📥 **جاري تنزيل الصوت...**")
+            dl = await replied.download()
+            link = replied.link
+            if replied.audio:
+                if replied.audio.title:
+                    songname = replied.audio.title[:70]
+                else:
+                    if replied.audio.file_name:
+                        songname = replied.audio.file_name[:70]
+                    else:
+                        songname = "Audio"
+            elif replied.voice:
+                songname = "Voice Note"
+            if chat_id in QUEUE:
+                pos = add_to_queue(chat_id, songname, dl, link, "Audio", 0)
+                await suhu.delete()
+                await m.reply_photo(
+                    photo=f"{IMG_1}",
+                    caption=f"💡 **تمت إضافة المقطع إلى قائمة الانتظار »** `{pos}`\n\n🏷 **الاسم:** [{songname}]({link})\n💭 **المجموعة:** `{chat_id}`\n🎧 **طلب بواسطة:** {m.from_user.mention()}",
+                    reply_markup=keyboard,
+                )
+            else:
+             try:
+                await suhu.edit("🔄 **يتم التشغيل...**")
+                await call_py.join_group_call(
+                    chat_id,
+                    AudioPiped(
+                        dl,
+                    ),
+                    stream_type=StreamType().local_stream,
+                )
+                add_to_queue(chat_id, songname, dl, link, "Audio", 0)
+                await suhu.delete()
+                requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
+                await m.reply_photo(
+                    photo=f"{IMG_2}",
+                    caption=f"💡 **بداء تشغيل الموسيقئ**\n\n🏷 **الاسم:** [{songname}]({link})\n💭 **المجموعة:** `{chat_id}`\n💡 **الحالة:** `شغال`\n🎧 **طلب بواسطة:** {requester}",
+                    reply_markup=keyboard,
+                )
+             except Exception as e:
+                await suhu.delete()
+                await m.reply_text(f"خطاء:\n\n» {e}")
+        else:
+            if len(m.command) < 2:
+                await m.reply(
+                    "» الرد على ** ملف صوتي ** أو ** أكتب شي للبحث**"
+                )
+            else:
+                suhu = await c.send_message(chat_id, "🔎 **Searching...**")
+                query = m.text.split(None, 1)[1]
+                search = ytsearch(query)
+                if search == 0:
+                    await suhu.edit("❌ **لم يتم العثور على نتائج**")
+                else:
+                    songname = search[0]
+                    url = search[1]
+                    veez, ytlink = await ytdl(url)
+                    if veez == 0:
+                        await suhu.edit(f"❌ تم اكتشاف مشاكل في youtube-dl\n\n» `{ytlink}`")
+                    else:
+                        if chat_id in QUEUE:
+                            pos = add_to_queue(
+                                chat_id, songname, ytlink, url, "Audio", 0
+                            )
+                            await suhu.delete()
+                            requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
+                            await m.reply_photo(
+                                photo=f"{IMG_1}",
+                                caption=f"💡 **تمت إضافة المقطع إلى قائمة الانتظار »** `{pos}`\n\n🏷 **الاسم:** [{songname}]({url})\n💭 **المجموعة:** `{chat_id}`\n🎧 **طلب بواسطة:** {requester}",
+                                reply_markup=keyboard,
+                            )
+                        else:
+                            try:
+                                await suhu.edit("🔄 **يتم التشغيل...**")
+                                await call_py.join_group_call(
+                                    chat_id,
+                                    AudioPiped(
+                                        ytlink,
+                                    ),
+                                    stream_type=StreamType().pulse_stream,
+                                )
+                                add_to_queue(chat_id, songname, ytlink, url, "Audio", 0)
+                                await suhu.delete()
+                                requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
+                                await m.reply_photo(
+                                    photo=f"{IMG_2}",
+                                    caption=f"💡 **بداء تشغيل الموسيقئ**\n\n🏷 **الاسم:** [{songname}]({url})\n💭 **المجموعة:** `{chat_id}`\n💡 **الحالة:** `شغال`\n🎧 **طلب بواسطة:** {requester}",
+                                    reply_markup=keyboard,
+                                )
+                            except Exception as ep:
+                                await suhu.delete()
+                                await m.reply_text(f"خطاء: `{ep}`")
 
-    c_time = time.time()
-    file_stark = f"{ytdl_data['id']}.mp4"
-    capy = f"**Video Name ➠** `{thum}` \n**Requested For :** `{urlissed}` \n**Channel :** `{thums}` \n**Link :** `{mo}`"
-    await client.send_video(
-        message.chat.id,
-        video=open(file_stark, "rb"),
-        duration=int(ytdl_data["duration"]),
-        file_name=str(ytdl_data["title"]),
-        thumb=sedlyf,
-        caption=capy,
-        supports_streaming=True,
-        progress=progress,
-        progress_args=(
-            pablo,
-            c_time,
-            f"`Uploading {urlissed} Song From YouTube Music!`",
-            file_stark,
-        ),
+    else:
+        if len(m.command) < 2:
+            await m.reply(
+                "» الرد على ** ملف صوتي ** أو ** أكتب شي للبحث**"
+            )
+        else:
+            suhu = await c.send_message(chat_id, "🔎 **جاري البحث...**")
+            query = m.text.split(None, 1)[1]
+            search = ytsearch(query)
+            if search == 0:
+                await suhu.edit("❌ **لم يتم العثور على نتائج**")
+            else:
+                songname = search[0]
+                url = search[1]
+                amort, ytlink = await ytdl(url)
+                if amort == 0:
+                    await suhu.edit(f"❌ تم اكتشاف مشاكل في youtube-dl\n\n» `{ytlink}`")
+                else:
+                    if chat_id in QUEUE:
+                        pos = add_to_queue(chat_id, songname, ytlink, url, "Audio", 0)
+                        await suhu.delete()
+                        requester = (
+                            f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
+                        )
+                        await m.reply_photo(
+                            photo=f"{IMG_1}",
+                            caption=f"💡 **تمت إضافة المقطع إلى قائمة الانتظار »** `{pos}`\n\n🏷 **الاسم:** [{songname}]({url})\n💭 **المجموعة:** `{chat_id}`\n🎧 **طلب بواسطة:** {requester}",
+                            reply_markup=keyboard,
+                        )
+                    else:
+                        try:
+                            await suhu.edit("🔄 **يتم التشغيل...**")
+                            await call_py.join_group_call(
+                                chat_id,
+                                AudioPiped(
+                                    ytlink,
+                                ),
+                                stream_type=StreamType().pulse_stream,
+                            )
+                            add_to_queue(chat_id, songname, ytlink, url, "Audio", 0)
+                            await suhu.delete()
+                            requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
+                            await m.reply_photo(
+                                photo=f"{IMG_2}",
+                                caption=f"💡 **بداء تشغيل الموسيقئ**\n\n🏷 **الاسم:** [{songname}]({url})\n💭 **المجموعة:** `{chat_id}`\n💡 **الحالة:** `شغال`\n🎧 **طلب بواسطة:** {requester}",
+                                reply_markup=keyboard,
+                            )
+                        except Exception as ep:
+                            await suhu.delete()
+                            await m.reply_text(f"خطاء: `{ep}`")
+
+
+# stream is used for live streaming only
+
+
+@Client.on_message(command(["stream", f"stream@{BOT_USERNAME}"]) & other_filters)
+async def stream(c: Client, m: Message):
+    chat_id = m.chat.id
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(text="• القائمة", callback_data="cbmenu"),
+                InlineKeyboardButton(text="• اغلاق", callback_data="cls"),
+            ]
+        ]
     )
-    await pablo.delete()
-    is_downloading = False
-    for files in (sedlyf, file_stark):
-        if files and os.path.exists(files):
-            os.remove(files)
+    if m.sender_chat:
+        return await m.reply_text("you're an __Anonymous Admin__ !\n\n» revert back to user account from admin rights.")
+    try:
+        aing = await c.get_me()
+    except Exception as e:
+        return await m.reply_text(f"error:\n\n{e}")
+    a = await c.get_chat_member(chat_id, aing.id)
+    if a.status != "administrator":
+        await m.reply_text(
+            f"💡 لاستخدامي ، يجب أن أكون ** مشرف ** مع ** الصلاحيات التالية **:\n\n» ❌ __حذف الرسائل__\n» ❌ __دعوة المستخدمين__\n» ❌ __ادارة المكالمات المرئية__\n\n** يتم تحديث البيانات ** تلقائيًا بعد أن تقوم بترقيتي **"
+        )
+        return
+    if not a.can_manage_voice_chats:
+        await m.reply_text(
+            "ليس لدي صلاحية:" + "\n\n» ❌ __ادارة المكالمات المرئية__"
+        )
+        return
+    if not a.can_delete_messages:
+        await m.reply_text(
+            "ليس لدي صلاحية:" + "\n\n» ❌ __حذف الرسائل__"
+        )
+        return
+    if not a.can_invite_users:
+        await m.reply_text("ليس لدي صلاحية:" + "\n\n» ❌ __اضافة مستخدمين__")
+        return
+    try:
+        ubot = await user.get_me()
+        b = await c.get_chat_member(chat_id, ubot.id)
+        if b.status == "kicked":
+            await m.reply_text(
+                f"@{ASSISTANT_NAME} **محظور في المجموعة** {m.chat.title}\n\n» **قم بإلغاء حظر المستخدم حساب المساعد أولاً إذا كنت تريد استخدام هذا البوت**"
+            )
+            return
+    except UserNotParticipant:
+        if m.chat.username:
+            try:
+                await user.join_chat(m.chat.username)
+            except Exception as e:
+                await m.reply_text(f"❌ **فشل userbot في الانضمام**\n\n**السبب**: `{e}`")
+                return
+        else:
+            try:
+                pope = await c.export_chat_invite_link(chat_id)
+                pepo = await c.revoke_chat_invite_link(chat_id, pope)
+                await user.join_chat(pepo.invite_link)
+            except UserAlreadyParticipant:
+                pass
+            except Exception as e:
+                return await m.reply_text(
+                    f"❌ **فشل userbot في الانضمام**\n\n**السبب**: `{e}`"
+                )
+
+    if len(m.command) < 2:
+        await m.reply("» أعطني رابط مباشر / من اليوتيوب للتشغيل")
+    else:
+        link = m.text.split(None, 1)[1]
+        suhu = await c.send_message(chat_id, "🔄 **تتم المعالجة انتظر قليلآ...**")
+
+        regex = r"^(https?\:\/\/)?(www\.youtube\.com|youtu\.?be)\/.+"
+        match = re.match(regex, link)
+        if match:
+            amort, livelink = await ytdl(link)
+        else:
+            livelink = link
+            amort = 1
+
+        if amort == 0:
+            await suhu.edit(f"❌ تم اكتشاف مشاكل في youtube-dl\n\n» `{livelink}`")
+        else:
+            if chat_id in QUEUE:
+                pos = add_to_queue(chat_id, "Radio", livelink, link, "Audio", 0)
+                await suhu.delete()
+                requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
+                await m.reply_photo(
+                    photo=f"{IMG_1}",
+                    caption=f"💡 **تمت إضافة المقطع إلى قائمة الانتظار »** `{pos}`\n\n💭 **المجموعة:** `{chat_id}`\n🎧 **طلب بواسطة:** {requester}",
+                    reply_markup=keyboard,
+                )
+            else:
+                try:
+                    await suhu.edit("🔄 **يتم الانضمام انتظر قليلآ...**")
+                    await call_py.join_group_call(
+                        chat_id,
+                        AudioPiped(
+                            livelink,
+                        ),
+                        stream_type=StreamType().live_stream,
+                    )
+                    add_to_queue(chat_id, "Radio", livelink, link, "Audio", 0)
+                    await suhu.delete()
+                    requester = (
+                        f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
+                    )
+                    await m.reply_photo(
+                        photo=f"{IMG_2}",
+                        caption=f"💡 **[موسيقئ مباشرة]({link}) بداء التشغيل**\n\n💭 **المجموعة:** `{chat_id}`\n💡 **الحالة:** `شغال`\n🎧 **طلب بواسطة:** {requester}",
+                        reply_markup=keyboard,
+                    )
+                except Exception as ep:
+                    await suhu.delete()
+                    await m.reply_text(f"خطاء: `{ep}`")
